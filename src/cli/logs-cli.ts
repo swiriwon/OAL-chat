@@ -55,6 +55,9 @@ type LogsCliOptions = {
 
 const LOCAL_FALLBACK_NOTICE = "Local Gateway RPC unavailable; reading configured file log instead.";
 
+const FOLLOW_INITIAL_BACKOFF_MS = 1_000;
+const FOLLOW_MAX_BACKOFF_MS = 10_000;
+
 function parsePositiveInt(value: string | undefined, fallback: number): number {
   if (!value) {
     return fallback;
@@ -232,6 +235,23 @@ function createLogWriters() {
   };
 }
 
+function formatTransientGatewayErrorSummary(err: unknown): string {
+  if (isGatewayTransportError(err)) {
+    if (err.kind === "closed") {
+      const code = typeof err.code === "number" ? ` ${err.code}` : "";
+      const reason = err.reason && err.reason !== "no close reason" ? `: ${err.reason}` : "";
+      return `gateway closed${code}${reason}`;
+    }
+    if (err.kind === "timeout") {
+      const ms = typeof err.timeoutMs === "number" ? ` after ${err.timeoutMs}ms` : "";
+      return `gateway timeout${ms}`;
+    }
+  }
+  const message = formatErrorMessage(err);
+  const firstLine = message.split("\n", 1)[0];
+  return firstLine && firstLine.length > 0 ? firstLine : "transient gateway error";
+}
+
 async function emitGatewayError(
   err: unknown,
   opts: LogsCliOptions,
@@ -298,6 +318,8 @@ export function registerLogsCli(program: Command) {
     const interval = parsePositiveInt(opts.interval, 1000);
     let cursor: number | undefined;
     let first = true;
+    let backoffMs = FOLLOW_INITIAL_BACKOFF_MS;
+    let inOutage = false;
     const jsonMode = Boolean(opts.json);
     const pretty = !jsonMode && process.stdout.isTTY && !opts.plain;
     const rich = isRich() && opts.color !== false;
@@ -311,16 +333,52 @@ export function registerLogsCli(program: Command) {
       try {
         payload = await fetchLogs(opts, cursor, showProgress);
       } catch (err) {
-        await emitGatewayError(
-          err,
-          opts,
-          jsonMode ? "json" : "text",
-          rich,
-          emitJsonLine,
-          errorLine,
-        );
-        process.exit(1);
-        return;
+        if (!opts.follow) {
+          await emitGatewayError(
+            err,
+            opts,
+            jsonMode ? "json" : "text",
+            rich,
+            emitJsonLine,
+            errorLine,
+          );
+          process.exit(1);
+          return;
+        }
+        // Follow mode keeps live monitoring resilient: emit a single one-line
+        // notice on transition into an outage, back off, and retry. Ctrl+C
+        // remains the user's exit path.
+        if (!inOutage) {
+          inOutage = true;
+          const summary = formatTransientGatewayErrorSummary(err);
+          const message = `logs: ${summary}; retrying...`;
+          if (jsonMode) {
+            if (!emitJsonLine({ type: "notice", message }, true)) {
+              return;
+            }
+          } else {
+            if (!errorLine(colorize(rich, theme.warn, message))) {
+              return;
+            }
+          }
+        }
+        await delay(backoffMs);
+        backoffMs = Math.min(backoffMs * 2, FOLLOW_MAX_BACKOFF_MS);
+        continue;
+      }
+      if (inOutage) {
+        inOutage = false;
+        backoffMs = FOLLOW_INITIAL_BACKOFF_MS;
+        const message = "logs: gateway reconnected";
+        if (jsonMode) {
+          if (!emitJsonLine({ type: "notice", message }, true)) {
+            return;
+          }
+        } else {
+          if (!errorLine(colorize(rich, theme.muted, message))) {
+            return;
+          }
+        }
       }
       const lines = Array.isArray(payload.lines) ? payload.lines : [];
       if (jsonMode) {

@@ -271,6 +271,130 @@ describe("logs cli", () => {
     expect(stderrWrites.join("")).toContain("Local Gateway RPC unavailable");
   });
 
+  it("retries transient gateway errors during --follow without exiting", async () => {
+    vi.useFakeTimers();
+    try {
+      callGatewayFromCli
+        .mockRejectedValueOnce(
+          new GatewayTransportError({
+            kind: "closed",
+            code: 1000,
+            reason: "no close reason",
+            connectionDetails: {
+              url: "ws://127.0.0.1:18789",
+              urlSource: "local loopback",
+              message: "",
+            },
+            message: "gateway closed (1000 normal closure): no close reason",
+          }),
+        )
+        .mockResolvedValueOnce({
+          file: "/tmp/openclaw.log",
+          cursor: 5,
+          size: 5,
+          lines: ["line one"],
+          truncated: false,
+          reset: false,
+        });
+
+      const stdoutWrites: string[] = [];
+      const stderrWrites: string[] = [];
+      let stdoutWriteCount = 0;
+      // Let the file-log header reach stdout, then EPIPE the next stdout write
+      // so the action exits via the broken-pipe path after we've proven both
+      // notices were emitted. The explicit --url skips the local-file fallback,
+      // ensuring we exercise the new retry branch.
+      vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+        stdoutWriteCount += 1;
+        if (stdoutWriteCount > 1) {
+          const err = new Error("EPIPE") as NodeJS.ErrnoException;
+          err.code = "EPIPE";
+          throw err;
+        }
+        stdoutWrites.push(String(chunk));
+        return true;
+      });
+      vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+      const exitSpy = vi
+        .spyOn(process, "exit")
+        .mockImplementation((() => undefined) as () => never);
+
+      const cliPromise = runLogsCli(["logs", "--follow", "--url", "ws://127.0.0.1:18789"]);
+      await vi.runAllTimersAsync();
+      await cliPromise;
+
+      expect(callGatewayFromCli).toHaveBeenCalledTimes(2);
+      expect(readConfiguredLogTail).not.toHaveBeenCalled();
+      expect(exitSpy).not.toHaveBeenCalled();
+      const stderr = stderrWrites.join("");
+      expect(stderr).toMatch(/gateway closed 1000.*retrying/);
+      expect(stderr).toContain("gateway reconnected");
+      expect(stdoutWrites.join("")).toContain("Log file:");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("emits the transient retry notice once per outage during --follow", async () => {
+    vi.useFakeTimers();
+    try {
+      const transportError = new GatewayTransportError({
+        kind: "closed",
+        code: 1000,
+        reason: "no close reason",
+        connectionDetails: {
+          url: "ws://127.0.0.1:18789",
+          urlSource: "local loopback",
+          message: "",
+        },
+        message: "gateway closed (1000 normal closure): no close reason",
+      });
+      callGatewayFromCli
+        .mockRejectedValueOnce(transportError)
+        .mockRejectedValueOnce(transportError)
+        .mockResolvedValueOnce({
+          file: "/tmp/openclaw.log",
+          cursor: 5,
+          size: 5,
+          lines: ["line one"],
+          truncated: false,
+          reset: false,
+        });
+
+      const stdoutWrites: string[] = [];
+      const stderrWrites: string[] = [];
+      let stdoutWriteCount = 0;
+      vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+        stdoutWriteCount += 1;
+        if (stdoutWriteCount > 1) {
+          const err = new Error("EPIPE") as NodeJS.ErrnoException;
+          err.code = "EPIPE";
+          throw err;
+        }
+        stdoutWrites.push(String(chunk));
+        return true;
+      });
+      vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+      vi.spyOn(process, "exit").mockImplementation((() => undefined) as () => never);
+
+      const cliPromise = runLogsCli(["logs", "--follow", "--url", "ws://127.0.0.1:18789"]);
+      await vi.runAllTimersAsync();
+      await cliPromise;
+
+      expect(callGatewayFromCli).toHaveBeenCalledTimes(3);
+      const retryingMatches = stderrWrites.join("").match(/retrying/gu) ?? [];
+      expect(retryingMatches).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not use local fallback for explicit Gateway URLs", async () => {
     callGatewayFromCli.mockRejectedValueOnce(
       new GatewayTransportError({

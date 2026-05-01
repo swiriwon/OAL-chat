@@ -57,6 +57,7 @@ openclaw logs --url ws://127.0.0.1:18789 --token "$OPENCLAW_GATEWAY_TOKEN"
 
 - Use `--local-time` to render timestamps in your local timezone.
 - If the implicit local loopback Gateway asks for pairing, closes during connect, or times out before `logs.tail` answers, `openclaw logs` falls back to the configured Gateway file log automatically. Explicit `--url` targets do not use this fallback.
+- In `--follow` mode, transient Gateway disconnects no longer exit the command. `openclaw logs --follow` prints a single `gateway closed ...; retrying...` notice on stderr, retries the next `logs.tail` poll with exponential backoff (1s up to 10s), and prints `gateway reconnected` once a poll succeeds. Press `Ctrl+C` to stop following.
 
 ## Related
 
