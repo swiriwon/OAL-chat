@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  BOUNDARY_CHECKS,
   formatCommand,
   resolveConcurrency,
   runChecks,
@@ -29,6 +30,14 @@ describe("run-additional-boundary-checks", () => {
     expect(formatCommand({ command: "pnpm", args: ["run", "lint:core"] })).toBe(
       "pnpm run lint:core",
     );
+  });
+
+  it("keeps the raw HTTP/2 import guard in source boundary checks", () => {
+    expect(BOUNDARY_CHECKS).toContainEqual({
+      label: "lint:tmp:no-raw-http2-imports",
+      command: "pnpm",
+      args: ["run", "lint:tmp:no-raw-http2-imports"],
+    });
   });
 
   it("buffers grouped output and reports aggregate failures", async () => {
