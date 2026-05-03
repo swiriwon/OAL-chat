@@ -34,10 +34,6 @@ export function stopActiveManagedProxyRegistration(
   }
 }
 
-export function hasActiveManagedProxyHandles(): boolean {
-  return activeProxyHandleCount > 0;
-}
-
 export function getActiveManagedProxyUrl(): string | undefined {
   return activeProxyUrl;
 }
