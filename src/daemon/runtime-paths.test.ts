@@ -39,11 +39,56 @@ function mockNodePathPresent(...nodePaths: string[]) {
 describe("resolvePreferredNodePath", () => {
   const darwinNode = "/opt/homebrew/bin/node";
   const fnmNode = "/Users/test/.fnm/node-versions/v24.11.1/installation/bin/node";
+  const linuxSystemNode = "/usr/bin/node";
+  const nvmNode = "/home/test/.nvm/versions/node/v24.14.1/bin/node";
 
-  it("prefers execPath (version manager node) over system node", async () => {
+  it("prefers supported system node over version-manager execPath", async () => {
     mockNodePathPresent(darwinNode);
 
-    const execFile = vi.fn().mockResolvedValue({ stdout: "24.11.1\n", stderr: "" });
+    const execFile = vi
+      .fn()
+      .mockResolvedValueOnce({ stdout: "24.11.1\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "24.11.1\n", stderr: "" });
+
+    const result = await resolvePreferredNodePath({
+      env: {},
+      runtime: "node",
+      platform: "darwin",
+      execFile,
+      execPath: fnmNode,
+    });
+
+    expect(result).toBe(darwinNode);
+    expect(execFile).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses system node for Linux service installs instead of nvm execPath", async () => {
+    mockNodePathPresent(linuxSystemNode);
+
+    const execFile = vi
+      .fn()
+      .mockResolvedValueOnce({ stdout: "24.14.1\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "24.14.1\n", stderr: "" });
+
+    const result = await resolvePreferredNodePath({
+      env: {},
+      runtime: "node",
+      platform: "linux",
+      execFile,
+      execPath: nvmNode,
+    });
+
+    expect(result).toBe(linuxSystemNode);
+    expect(execFile).toHaveBeenCalledTimes(2);
+  });
+
+  it("falls back to version-manager execPath when no supported system node exists", async () => {
+    mockNodePathPresent(darwinNode);
+
+    const execFile = vi
+      .fn()
+      .mockResolvedValueOnce({ stdout: "24.11.1\n", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "18.0.0\n", stderr: "" });
 
     const result = await resolvePreferredNodePath({
       env: {},
@@ -54,7 +99,7 @@ describe("resolvePreferredNodePath", () => {
     });
 
     expect(result).toBe(fnmNode);
-    expect(execFile).toHaveBeenCalledTimes(1);
+    expect(execFile).toHaveBeenCalledTimes(2);
   });
 
   it("falls back to system node when execPath version is unsupported", async () => {
