@@ -1,0 +1,47 @@
+# OpenAgentLink fork CI — builds the OpenClaw template image and pushes
+# to Fly's internal registry. New machines spawned by OAL's companion
+# pull the :latest tag at workspace creation time.
+#
+# Pattern note: paperclip fork (swiriwon/OAL-update) pushes to GHCR with
+# explicit SHA tags + monorepo SHA-bump cycle. OpenClaw deliberately
+# diverges:
+#   - per-user template, not a single shared service → no need for
+#     atomic monorepo-coordinated rollouts
+#   - same-infra pull is faster on the spawn critical path
+#   - one less external secret to manage in the Fly env
+# See OAL specs/sprint-4/layer-4-openclaw-env-merge.md "Step C" for the
+# decision rationale.
+
+name: openagentlink-build
+
+on:
+  push:
+    branches:
+      - openagentlink
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Build and push to Fly registry
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          # The Fly app `openclaw-template` is the registry holder, not
+          # a runnable app. We push to its registry slot so per-user apps
+          # can `image: registry.fly.io/openclaw-template:latest`.
+          flyctl deploy \
+            --app openclaw-template \
+            --image-label latest \
+            --build-only \
+            --push \
+            --remote-only

@@ -273,18 +273,62 @@ ENV NODE_ENV=production
 # This reduces the attack surface by preventing container escape via root privileges
 USER node
 
-# Start gateway server with default config.
-# Binds to loopback (127.0.0.1) by default for security.
+# OAL fork: seed a minimal openclaw config that:
+#   1) disables the Control UI (we don't expose the Control UI
+#      externally - paperclip's chat-proxy only reaches chat endpoints,
+#      auth-gated by OPENCLAW_GATEWAY_TOKEN). Without this, the
+#      non-loopback bind trips the controlUi.allowedOrigins startup
+#      guard (src/gateway/server-runtime-config.ts:147).
+#   2) enables the OpenAI-compatible /v1/chat/completions HTTP endpoint
+#      (default off in OpenClaw). paperclip's chat-proxy forwards
+#      browser POSTs through this surface; without it the gateway
+#      returns 404 for every chat request.
 #
-# IMPORTANT: With Docker bridge networking (-p 18789:18789), loopback bind
-# makes the gateway unreachable from the host. Either:
-#   - Use --network host, OR
-#   - Override --bind to "lan" (0.0.0.0) and set auth credentials
+# OAL fork: also pre-mark the default workspace's bootstrap status as
+# already complete by seeding workspace-state.json with setupCompletedAt.
+#
+# Why: OpenClaw's default first-run "BOOTSTRAP.md" workflow is meant
+# for a freshly installed CLI where the user collaboratively names the
+# agent and writes its IDENTITY/SOUL/USER files. OAL machines are a
+# pre-configured per-company deployment - the user is talking to
+# "their workspace agent", not bootstrapping a personality. Without
+# this opt-out, ensureAgentWorkspace seeds BOOTSTRAP.md on first boot,
+# isWorkspaceBootstrapPending() returns true on every interactive run,
+# resolveBootstrapMode() returns "full", and buildAgentUserPromptPrefix
+# prepends "[Bootstrap pending] please read BOOTSTRAP.md..." to the
+# first user message. That balloons the first turn to ~20k tokens of
+# context, costs ~$0.07, makes the model call a `read` tool, and adds
+# 5+ seconds of latency.
+#
+# Why setupCompletedAt rather than agents.defaults.skipBootstrap=true:
+# the latter early-returns ensureAgentWorkspace without creating any
+# of the AGENTS/SOUL/TOOLS/IDENTITY/USER/HEARTBEAT.md template files
+# the agent loop reads as its own system prompt context. Production
+# gateway then stalls on a session lock when the context engine
+# encounters the empty workspace (different code path from the dev CLI
+# which seeds its own minimal dev workspace). Pre-writing
+# setupCompletedAt instead lets ensureAgentWorkspace create the six
+# templates normally but skips writing BOOTSTRAP.md (workspace.ts:419-
+# 463 only creates BOOTSTRAP when both setupCompletedAt and
+# bootstrapSeededAt are unset). isWorkspaceBootstrapPending then
+# short-circuits to "complete" on setupCompletedAt without checking
+# BOOTSTRAP.md, so the bootstrap prefix is never injected.
+RUN mkdir -p /home/node/.openclaw/workspace/.openclaw \
+ && printf '%s\n' '{"gateway":{"controlUi":{"enabled":false},"http":{"endpoints":{"chatCompletions":{"enabled":true}}}}}' > /home/node/.openclaw/openclaw.json \
+ && printf '%s\n' '{"version":1,"setupCompletedAt":"2026-01-01T00:00:00.000Z"}' > /home/node/.openclaw/workspace/.openclaw/workspace-state.json
+
+# Start gateway server with default config.
+#
+# OAL fork (Sprint 4): bind to "lan" (0.0.0.0) and pin to port 8080 so
+# Fly's edge proxy (services.internal_port = 8080) can reach the
+# gateway over the machine's 6PN address. Auth is enforced via
+# OPENCLAW_GATEWAY_TOKEN injected by packages/core-plugin/src/provisioning/flyio.ts
+# (gateway.auth.mode = "token"), so opening 0.0.0.0 isn't an
+# unauthenticated surface — the token is required for every request.
 #
 # Built-in probe endpoints for container health checks:
 #   - GET /healthz (liveness) and GET /readyz (readiness)
 #   - aliases: /health and /ready
-# For external access from host/ingress, override bind to "lan" and set auth.
 HEALTHCHECK --interval=3m --timeout=10s --start-period=15s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]
+  CMD node -e "fetch('http://127.0.0.1:8080/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured", "--bind", "lan"]

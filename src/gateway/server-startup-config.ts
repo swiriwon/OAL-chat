@@ -9,6 +9,11 @@ import { applyPluginAutoEnable } from "../config/plugin-auto-enable.js";
 import { applyConfigOverrides } from "../config/runtime-overrides.js";
 import type { GatewayAuthConfig, GatewayTailscaleConfig } from "../config/types.gateway.js";
 import type { ConfigFileSnapshot, OpenClawConfig } from "../config/types.openclaw.js";
+// OAL fork (Sprint 4 Layer 4): merge OPENCLAW_USER_MCP_SERVERS_JSON env into mcp.servers.
+import {
+  type UserMcpServersLogger,
+  applyUserMcpServersFromEnv,
+} from "../config/user-mcp-servers.js";
 import { isTruthyEnvValue } from "../infra/env.js";
 import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.js";
 import {
@@ -92,11 +97,15 @@ export async function loadGatewayStartupConfigSnapshot(params: {
         }),
       );
   if (autoEnable.changes.length === 0) {
-    return {
-      snapshot: configSnapshot,
-      wroteConfig,
-      ...(pluginMetadataSnapshot ? { pluginMetadataSnapshot } : {}),
-    };
+    // OAL fork (Layer 4): merge OPENCLAW_USER_MCP_SERVERS_JSON before returning.
+    return withUserMcpServersMerge(
+      {
+        snapshot: configSnapshot,
+        wroteConfig,
+        ...(pluginMetadataSnapshot ? { pluginMetadataSnapshot } : {}),
+      },
+      params.log,
+    );
   }
 
   try {
@@ -119,10 +128,62 @@ export async function loadGatewayStartupConfigSnapshot(params: {
     params.log.warn(`gateway: failed to persist plugin auto-enable changes: ${String(err)}`);
   }
 
+  // OAL fork (Layer 4): merge OPENCLAW_USER_MCP_SERVERS_JSON before returning.
+  return withUserMcpServersMerge(
+    {
+      snapshot: configSnapshot,
+      wroteConfig,
+      ...(pluginMetadataSnapshot ? { pluginMetadataSnapshot } : {}),
+    },
+    params.log,
+  );
+}
+
+/**
+ * OpenAgentLink fork addition (Sprint 4 Layer 4).
+ *
+ * Apply OPENCLAW_USER_MCP_SERVERS_JSON to a freshly-loaded config
+ * snapshot result. The companion injects this env var on the spawned
+ * Fly.io machine; reading it here means every gateway boot path picks
+ * up the per-company connector entries automatically before
+ * validation, secrets activation, or the runtime-snapshot pin.
+ *
+ * Pure: returns a new result when the env contributes entries, the
+ * original result otherwise. Both `runtimeConfig` and the deprecated
+ * `config` alias are kept in sync so downstream readers see the same
+ * merged shape regardless of which field they pick.
+ *
+ * Defensive: a missing / malformed env var logs a warning and falls
+ * back to the input result — boot must never wedge over a bad env.
+ */
+function withUserMcpServersMerge(
+  result: GatewayStartupConfigSnapshotLoadResult,
+  log: GatewayStartupLog,
+): GatewayStartupConfigSnapshotLoadResult {
+  const logger: UserMcpServersLogger = {
+    debug: (msg, meta) => {
+      // GatewayStartupLog has no debug surface; collapse to info so
+      // diagnostic merges are still observable in production logs.
+      log.info(meta ? `${msg} ${JSON.stringify(meta)}` : msg);
+    },
+    warn: (msg, meta) => {
+      log.warn(meta ? `${msg} ${JSON.stringify(meta)}` : msg);
+    },
+  };
+  const merged = applyUserMcpServersFromEnv(result.snapshot.runtimeConfig, { logger });
+  if (merged === result.snapshot.runtimeConfig) {
+    return result;
+  }
+  // The branded RuntimeConfig type is structurally an OpenClawConfig with
+  // a phantom symbol; the merge result is the same shape, so re-brand.
+  const brandedMerged = merged as ConfigFileSnapshot["runtimeConfig"];
   return {
-    snapshot: configSnapshot,
-    wroteConfig,
-    ...(pluginMetadataSnapshot ? { pluginMetadataSnapshot } : {}),
+    ...result,
+    snapshot: {
+      ...result.snapshot,
+      runtimeConfig: brandedMerged,
+      config: brandedMerged,
+    },
   };
 }
 

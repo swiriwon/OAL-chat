@@ -249,7 +249,14 @@ export async function resolveGatewayBindHost(
   }
 
   if (mode === "lan") {
-    return "0.0.0.0";
+    // OAL fork: bind to IPv6 wildcard so the gateway accepts both
+    // IPv4 and IPv6 connections (Node + Linux default to dual-stack).
+    // Fly.io's edge proxy reaches machines over their 6PN IPv6 address;
+    // an IPv4-only "0.0.0.0" listen is invisible to that proxy and
+    // every chat-proxy forward returns ECONNRESET. "::" + dual-stack
+    // also keeps IPv4 clients (loopback probes, internal tooling)
+    // working without changes.
+    return "::";
   }
 
   if (mode === "custom") {
